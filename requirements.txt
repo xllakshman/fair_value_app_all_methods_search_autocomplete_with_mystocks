@@ -6,3 +6,4 @@ requests>=2.31.0
 matplotlib>=3.8.4
 scipy>=1.13.1
 plotly>=5.22.0
+ta
