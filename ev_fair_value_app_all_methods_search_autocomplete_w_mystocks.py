@@ -13,7 +13,7 @@ from ta.trend import MACD
 st.set_page_config(page_title="Stock Fair Value Analyzer", layout="wide")
 st.title("📈 Global Equities Fair Value Recommendation")
 
-GITHUB_CSV_URL = "https://raw.githubusercontent.com/xllakshman/ev_fair_value_app_with_serach/main/stock_list.csv"
+GITHUB_CSV_URL = "https://raw.githubusercontent.com/xllakshman/fair_value_app_all_methods_search_autocomplete_with_mystocks/main/stock_list.csv"
 
 def format_currency(val, currency_code="USD"):
     symbols = {"USD": "$", "INR": "₹", "EUR": "€", "GBP": "£", "JPY": "¥"}
