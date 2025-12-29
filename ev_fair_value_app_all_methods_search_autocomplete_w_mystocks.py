@@ -26,7 +26,7 @@ def safe_format_currency(df, col, currency):
         df[col] = df[col].apply(lambda x: format_currency(x, currency) if pd.notna(x) else None)
 
 # =====================================================
-# YAHOO SAFE DATA (CACHEABLE)
+# YAHOO SAFE DATA (CACHEABLE, SERIALIZABLE)
 # =====================================================
 @st.cache_data(ttl=3600)
 def get_yahoo_info(ticker):
@@ -77,7 +77,10 @@ def pe_valuation(eps, pe_ratio=15):
         return None
     return round(eps * pe_ratio, 2)
 
-def get_fair_value(ticker, growth_rate=0.10):
+# =====================================================
+# EV VALUATION (EV IS OPTIONAL)
+# =====================================================
+def get_ev_fair_value(ticker, growth_rate=0.10):
     info = get_yahoo_info(ticker)
 
     ev = info["enterpriseValue"]
@@ -85,38 +88,24 @@ def get_fair_value(ticker, growth_rate=0.10):
     shares = info["sharesOutstanding"]
     current_price = info["currentPrice"]
 
-    if not (ev and ebitda and shares and current_price):
-        return None, None
+    if not (ev and ebitda and shares):
+        return None
 
     ev_ebitda_ratio = ev / ebitda
     projected_ebitda = ebitda * (1 + growth_rate)
     projected_ev = projected_ebitda * ev_ebitda_ratio
-    fair_price = projected_ev / shares
+    return round(projected_ev / shares, 2)
 
-    return round(fair_price, 2), current_price
-
-def ev_valuation(ticker):
-    fair_price, current_price = get_fair_value(ticker)
-    if fair_price is None:
-        return None
-
+def build_stock_snapshot(ticker):
     info = get_yahoo_info(ticker)
+    current_price = info["currentPrice"]
+
+    if current_price is None:
+        return None  # ONLY hard stop condition
+
     hist = yf.Ticker(ticker).history(period="3y")
 
-    market_cap = info["marketCap"]
-    cap_type = (
-        "Mega" if market_cap and market_cap >= 200_000_000_000 else
-        "Large" if market_cap and market_cap >= 10_000_000_000 else
-        "Mid" if market_cap and market_cap >= 2_000_000_000 else "Small"
-    )
-
-    underval_pct = ((fair_price - current_price) / current_price) * 100
-    band = (
-        "Deep Discount" if underval_pct > 30 else
-        "High Value" if underval_pct > 20 else
-        "Undervalued" if underval_pct > 10 else
-        "Fair/Premium"
-    )
+    ev_val = get_ev_fair_value(ticker)
 
     high_3y = hist["High"].max() if not hist.empty else None
     low_3y = hist["Low"].min() if not hist.empty else None
@@ -124,17 +113,13 @@ def ev_valuation(ticker):
     return {
         "Symbol": ticker,
         "Name": info["shortName"],
-        "Market Value (EV)": fair_price,
         "Current Price": current_price,
-        "Undervalued (%)": round(underval_pct, 2),
-        "Valuation Band": band,
-        "Cap Size": cap_type,
+        "Market Value (EV)": ev_val,
         "Industry": info["industry"],
         "3Y High": round(high_3y, 2) if high_3y else None,
         "3Y Low": round(low_3y, 2) if low_3y else None,
         "Entry Price": round(low_3y * 1.05, 2) if low_3y else None,
         "Exit Price": round(high_3y * 0.95, 2) if high_3y else None,
-        "Signal": "Buy" if fair_price > current_price else "Hold/Sell"
     }
 
 # =====================================================
@@ -159,27 +144,28 @@ def search_yahoo_finance(query):
 # =====================================================
 query = st.text_input("🔍 Type company name or stock ticker:")
 
-ticker_symbol = None
+ticker = None
 if query and len(query) >= 2:
     matches = search_yahoo_finance(query)
     if matches:
         sel = st.selectbox("Select a match:", matches)
-        ticker_symbol = sel.split(" - ")[0]
+        ticker = sel.split(" - ")[0]
 
-if ticker_symbol:
-    result = ev_valuation(ticker_symbol)
-    info = get_yahoo_info(ticker_symbol)
+if ticker:
+    snapshot = build_stock_snapshot(ticker)
 
-    if result is None:
-        st.warning("⚠️ Yahoo has limited data for this stock.")
+    if snapshot is None:
+        st.warning("⚠️ Price data unavailable for this stock.")
         st.stop()
+
+    info = get_yahoo_info(ticker)
+    currency = info["currency"]
 
     eps = info["trailingEps"]
     bvps = info["bookValue"]
     pe_ratio = info["trailingPE"]
-    currency = info["currency"]
 
-    ev_val = result["Market Value (EV)"]
+    ev_val = snapshot["Market Value (EV)"]
     dcf_val = dcf_valuation(eps)
     graham_val = graham_valuation(eps, bvps)
     pe_val = pe_valuation(eps, pe_ratio)
@@ -190,10 +176,13 @@ if ticker_symbol:
 
     # ---------------- TAB 1 ----------------
     with tab1:
-        df = pd.DataFrame([result])
+        df = pd.DataFrame([snapshot])
         for col in ["Market Value (EV)", "Current Price", "3Y High", "3Y Low", "Entry Price", "Exit Price"]:
             safe_format_currency(df, col, currency)
         st.dataframe(df)
+
+        if ev_val is None:
+            st.info("ℹ️ EV-based valuation unavailable for this stock (Yahoo limitation).")
 
         st.markdown("## 📊 Weighted Fair Value")
 
@@ -230,13 +219,13 @@ if ticker_symbol:
             if applied_weight > 0:
                 combined_val = round(weighted_sum / applied_weight, 2)
                 exp_return = round(
-                    ((combined_val - result["Current Price"]) / result["Current Price"]) * 100, 2
+                    ((combined_val - snapshot["Current Price"]) / snapshot["Current Price"]) * 100, 2
                 )
 
                 st.table({
                     "Metric": ["Current Price", "Combined Fair Value", "Expected Return %"],
                     "Value": [
-                        format_currency(result["Current Price"], currency),
+                        format_currency(snapshot["Current Price"], currency),
                         format_currency(combined_val, currency),
                         f"{exp_return}%"
                     ]
@@ -253,7 +242,7 @@ if ticker_symbol:
 
     # ---------------- TAB 3 (UNCHANGED) ----------------
     with tab3:
-        hist = yf.Ticker(ticker_symbol).history(period="5y")
+        hist = yf.Ticker(ticker).history(period="5y")
         hist.reset_index(inplace=True)
 
         hist["SMA_50"] = SMAIndicator(hist["Close"], 50).sma_indicator()
