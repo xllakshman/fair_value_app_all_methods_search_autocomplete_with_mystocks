@@ -14,7 +14,7 @@ from yfinance.exceptions import YFRateLimitError
 st.set_page_config(page_title="Stock Fair Value Analyzer", layout="wide")
 st.title("📈 Global Equities Fair Value Recommendation")
 
-GITHUB_CSV_URL = "https://raw.githubusercontent.com/xllakshman/f.../stock_list.csv"
+GITHUB_CSV_URL = "https://github.com/xllakshman/fair_value_app_all_methods_search_autocomplete_with_mystocks/blob/main/stock_list.csv"
 
 # =====================================================
 # SAFE YAHOO INFO FIX (UNCHANGED)
