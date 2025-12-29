@@ -14,13 +14,25 @@ st.set_page_config(page_title="Stock Fair Value Analyzer", layout="wide")
 st.title("📈 Global Equities Fair Value Recommendation")
 
 # =====================================================
-# YAHOO SAFE ADAPTER (CRITICAL FIX)
+# FORMAT HELPERS
+# =====================================================
+def format_currency(val, currency="USD"):
+    symbols = {"USD": "$", "INR": "₹", "EUR": "€", "GBP": "£", "JPY": "¥"}
+    symbol = symbols.get(currency, currency)
+    return f"{symbol}{val:,.2f}" if val is not None else "-"
+
+def safe_format_currency(df, col, currency):
+    if col in df.columns:
+        df[col] = df[col].apply(lambda x: format_currency(x, currency) if pd.notna(x) else None)
+
+# =====================================================
+# YAHOO SAFE DATA ADAPTER (CACHE-SAFE)
 # =====================================================
 @st.cache_data(ttl=3600)
-def get_yahoo_data(ticker):
+def get_yahoo_info(ticker):
     """
-    Single, cached Yahoo access point.
-    Prevents rate-limit crashes.
+    Fetch ONLY serializable Yahoo data.
+    No yf.Ticker object returned.
     """
     t = yf.Ticker(ticker)
 
@@ -28,38 +40,27 @@ def get_yahoo_data(ticker):
         info = t.info
     except YFRateLimitError:
         info = {}
+    except Exception:
+        info = {}
 
-    # fallback to fast_info where possible
-    fi = t.fast_info or {}
+    try:
+        fi = t.fast_info or {}
+    except Exception:
+        fi = {}
 
     return {
-        "ticker": t,
-        "info": {
-            "enterpriseValue": info.get("enterpriseValue"),
-            "ebitda": info.get("ebitda"),
-            "sharesOutstanding": info.get("sharesOutstanding"),
-            "currentPrice": info.get("currentPrice") or fi.get("last_price"),
-            "marketCap": info.get("marketCap") or fi.get("market_cap"),
-            "shortName": info.get("shortName", "N/A"),
-            "industry": info.get("industry", "N/A"),
-            "currency": info.get("currency", "USD"),
-            "trailingEps": info.get("trailingEps"),
-            "bookValue": info.get("bookValue"),
-            "trailingPE": info.get("trailingPE", 15),
-        }
+        "enterpriseValue": info.get("enterpriseValue"),
+        "ebitda": info.get("ebitda"),
+        "sharesOutstanding": info.get("sharesOutstanding"),
+        "currentPrice": info.get("currentPrice") or fi.get("last_price"),
+        "marketCap": info.get("marketCap") or fi.get("market_cap"),
+        "shortName": info.get("shortName", "N/A"),
+        "industry": info.get("industry", "N/A"),
+        "currency": info.get("currency", "USD"),
+        "trailingEps": info.get("trailingEps"),
+        "bookValue": info.get("bookValue"),
+        "trailingPE": info.get("trailingPE", 15),
     }
-
-# =====================================================
-# FORMAT HELPERS
-# =====================================================
-def format_currency(val, currency="USD"):
-    symbols = {"USD": "$", "INR": "₹", "EUR": "€", "GBP": "£"}
-    s = symbols.get(currency, currency)
-    return f"{s}{val:,.2f}" if val is not None else "-"
-
-def safe_format_currency(df, col, currency):
-    if col in df.columns:
-        df[col] = df[col].apply(lambda x: format_currency(x, currency))
 
 # =====================================================
 # VALUATION LOGIC (UNCHANGED)
@@ -81,8 +82,7 @@ def pe_valuation(eps, pe_ratio=15):
     return round(eps * pe_ratio, 2)
 
 def get_fair_value(ticker, growth_rate=0.10):
-    yd = get_yahoo_data(ticker)
-    info = yd["info"]
+    info = get_yahoo_info(ticker)
 
     ev = info["enterpriseValue"]
     ebitda = info["ebitda"]
@@ -104,9 +104,8 @@ def ev_valuation(ticker):
     if fair_price is None:
         return None
 
-    yd = get_yahoo_data(ticker)
-    info = yd["info"]
-    hist = yd["ticker"].history(period="3y")
+    info = get_yahoo_info(ticker)
+    hist = yf.Ticker(ticker).history(period="3y")
 
     market_cap = info["marketCap"]
     cap_type = (
@@ -116,6 +115,7 @@ def ev_valuation(ticker):
     )
 
     underval_pct = ((fair_price - current_price) / current_price) * 100
+
     band = (
         "Deep Discount" if underval_pct > 30 else
         "High Value" if underval_pct > 20 else
@@ -135,22 +135,45 @@ def ev_valuation(ticker):
         "Valuation Band": band,
         "Cap Size": cap_type,
         "Industry": info["industry"],
-        "3Y High": high_3y,
-        "3Y Low": low_3y,
+        "3Y High": round(high_3y, 2) if high_3y else None,
+        "3Y Low": round(low_3y, 2) if low_3y else None,
         "Entry Price": round(low_3y * 1.05, 2) if low_3y else None,
         "Exit Price": round(high_3y * 0.95, 2) if high_3y else None,
         "Signal": "Buy" if fair_price > current_price else "Hold/Sell"
     }
 
 # =====================================================
+# YAHOO SEARCH (CACHED)
+# =====================================================
+@st.cache_data(show_spinner=False)
+def search_yahoo_finance(query):
+    url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=10&newsCount=0"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = requests.get(url, headers=headers, timeout=5)
+    if r.status_code != 200:
+        return []
+    data = r.json()
+    return [
+        f"{q['symbol']} - {q.get('shortname','')}"
+        for q in data.get("quotes", [])
+        if q.get("symbol")
+    ]
+
+# =====================================================
 # UI
 # =====================================================
-ticker_symbol = st.text_input("🔍 Enter Stock Ticker (e.g. AAPL, AMZN, MSFT)").upper().strip()
+query = st.text_input("🔍 Type company name or stock ticker:")
+
+ticker_symbol = None
+if query and len(query) >= 2:
+    matches = search_yahoo_finance(query)
+    if matches:
+        sel = st.selectbox("Select a match:", matches)
+        ticker_symbol = sel.split(" - ")[0]
 
 if ticker_symbol:
     result = ev_valuation(ticker_symbol)
-    yd = get_yahoo_data(ticker_symbol)
-    info = yd["info"]
+    info = get_yahoo_info(ticker_symbol)
 
     if result is None:
         st.warning("⚠️ Yahoo has limited data for this stock.")
@@ -159,7 +182,9 @@ if ticker_symbol:
     eps = info["trailingEps"]
     bvps = info["bookValue"]
     pe_ratio = info["trailingPE"]
+    currency = info["currency"]
 
+    ev_val = result["Market Value (EV)"]
     dcf_val = dcf_valuation(eps)
     graham_val = graham_valuation(eps, bvps)
     pe_val = pe_valuation(eps, pe_ratio)
@@ -169,19 +194,19 @@ if ticker_symbol:
     with tab1:
         df = pd.DataFrame([result])
         for col in ["Market Value (EV)", "Current Price", "3Y High", "3Y Low", "Entry Price", "Exit Price"]:
-            safe_format_currency(df, col, info["currency"])
+            safe_format_currency(df, col, currency)
         st.dataframe(df)
 
     with tab2:
         st.dataframe(pd.DataFrame([{
-            "EV Value": format_currency(result["Market Value (EV)"], info["currency"]),
-            "DCF Value": format_currency(dcf_val, info["currency"]),
-            "Graham Value": format_currency(graham_val, info["currency"]),
-            "PE Value": format_currency(pe_val, info["currency"])
+            "EV Value": format_currency(ev_val, currency),
+            "DCF Value": format_currency(dcf_val, currency),
+            "Graham Value": format_currency(graham_val, currency),
+            "PE Value": format_currency(pe_val, currency)
         }]))
 
     with tab3:
-        hist = yd["ticker"].history(period="5y")
+        hist = yf.Ticker(ticker_symbol).history(period="5y")
         hist.reset_index(inplace=True)
 
         hist["SMA_50"] = SMAIndicator(hist["Close"], 50).sma_indicator()
