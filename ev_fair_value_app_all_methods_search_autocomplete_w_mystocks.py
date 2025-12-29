@@ -26,14 +26,10 @@ def safe_format_currency(df, col, currency):
         df[col] = df[col].apply(lambda x: format_currency(x, currency) if pd.notna(x) else None)
 
 # =====================================================
-# YAHOO SAFE DATA ADAPTER (CACHE-SAFE)
+# YAHOO SAFE DATA (CACHEABLE)
 # =====================================================
 @st.cache_data(ttl=3600)
 def get_yahoo_info(ticker):
-    """
-    Fetch ONLY serializable Yahoo data.
-    No yf.Ticker object returned.
-    """
     t = yf.Ticker(ticker)
 
     try:
@@ -63,7 +59,7 @@ def get_yahoo_info(ticker):
     }
 
 # =====================================================
-# VALUATION LOGIC (UNCHANGED)
+# VALUATION METHODS (UNCHANGED)
 # =====================================================
 def dcf_valuation(eps, growth_rate=0.08, discount_rate=0.10):
     if eps is None or eps <= 0:
@@ -115,7 +111,6 @@ def ev_valuation(ticker):
     )
 
     underval_pct = ((fair_price - current_price) / current_price) * 100
-
     band = (
         "Deep Discount" if underval_pct > 30 else
         "High Value" if underval_pct > 20 else
@@ -189,14 +184,65 @@ if ticker_symbol:
     graham_val = graham_valuation(eps, bvps)
     pe_val = pe_valuation(eps, pe_ratio)
 
-    tab1, tab2, tab3 = st.tabs(["📋 Fair Value", "📂 Valuation by method", "📈 Technical Indicators"])
+    tab1, tab2, tab3 = st.tabs(
+        ["📋 Fair Value", "📂 Valuation by method", "📈 Technical Indicators"]
+    )
 
+    # ---------------- TAB 1 ----------------
     with tab1:
         df = pd.DataFrame([result])
         for col in ["Market Value (EV)", "Current Price", "3Y High", "3Y Low", "Entry Price", "Exit Price"]:
             safe_format_currency(df, col, currency)
         st.dataframe(df)
 
+        st.markdown("## 📊 Weighted Fair Value")
+
+        col1, col2, col3, col4 = st.columns(4)
+        w_ev = col1.slider("EV (%)", 0, 100, 30)
+        w_dcf = col2.slider("DCF (%)", 0, 100, 30)
+        w_graham = col3.slider("Graham (%)", 0, 100, 20)
+        w_pe = col4.slider("PE (%)", 0, 100, 20)
+
+        if w_ev + w_dcf + w_graham + w_pe != 100:
+            st.warning("⚠️ Total weight must equal 100%")
+        else:
+            values = {
+                "EV": ev_val,
+                "DCF": dcf_val,
+                "Graham": graham_val,
+                "PE": pe_val,
+            }
+            weights = {
+                "EV": w_ev,
+                "DCF": w_dcf,
+                "Graham": w_graham,
+                "PE": w_pe,
+            }
+
+            weighted_sum = 0
+            applied_weight = 0
+
+            for k, v in values.items():
+                if v is not None:
+                    weighted_sum += v * weights[k]
+                    applied_weight += weights[k]
+
+            if applied_weight > 0:
+                combined_val = round(weighted_sum / applied_weight, 2)
+                exp_return = round(
+                    ((combined_val - result["Current Price"]) / result["Current Price"]) * 100, 2
+                )
+
+                st.table({
+                    "Metric": ["Current Price", "Combined Fair Value", "Expected Return %"],
+                    "Value": [
+                        format_currency(result["Current Price"], currency),
+                        format_currency(combined_val, currency),
+                        f"{exp_return}%"
+                    ]
+                })
+
+    # ---------------- TAB 2 ----------------
     with tab2:
         st.dataframe(pd.DataFrame([{
             "EV Value": format_currency(ev_val, currency),
@@ -205,6 +251,7 @@ if ticker_symbol:
             "PE Value": format_currency(pe_val, currency)
         }]))
 
+    # ---------------- TAB 3 (UNCHANGED) ----------------
     with tab3:
         hist = yf.Ticker(ticker_symbol).history(period="5y")
         hist.reset_index(inplace=True)
